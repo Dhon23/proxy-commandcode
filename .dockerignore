@@ -1,0 +1,6 @@
+.git/
+.gitignore
+.commandcode/
+proxy.log
+README.md
+node_modules/

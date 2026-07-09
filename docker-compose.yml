@@ -1,0 +1,10 @@
+services:
+  proxy:
+    build: .
+    container_name: commandcode-proxy
+    restart: unless-stopped
+    ports:
+      - "${PCMC_PORT:-3456}:3456"
+    environment:
+      - PCMC_PORT=${PCMC_PORT:-3456}
+      - PCMC_VERSION=${PCMC_VERSION:-0.39.1}
