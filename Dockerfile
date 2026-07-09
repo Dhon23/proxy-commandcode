@@ -8,6 +8,7 @@ COPY --chown=app:app package.json .
 RUN npm install --omit=dev 2>/dev/null || true
 
 COPY --chown=app:app server.js .
+COPY --chown=app:app src/ ./src/
 
 USER app
 

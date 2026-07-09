@@ -1,17 +1,34 @@
 const { CORS, sse } = require('./config');
 const { log } = require('./logger');
 
-function handleUpstreamResponse(proxyRes, res, model, isStream) {
+function parseLine(line) {
+  const t = line.trim();
+  if (!t) return null;
+  try { return JSON.parse(t); } catch { return null; }
+}
+
+function extractUsage(evt) {
+  if (!evt || !evt.usage) return null;
+  const u = evt.usage;
+  return {
+    prompt_tokens: u.inputTokens || 0,
+    completion_tokens: u.outputTokens || 0,
+    total_tokens: u.totalTokens || 0,
+  };
+}
+
+function handleUpstreamResponse(proxyRes, res, model, clientStream) {
   if (proxyRes.statusCode >= 400) {
     res.writeHead(proxyRes.statusCode, { ...CORS, 'Content-Type': 'application/json' });
     proxyRes.pipe(res);
     return;
   }
 
-  const genId = 'chatcmpl-' + Date.now();
+  let genId = 'chatcmpl-' + Date.now();
+  let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 
-  if (!isStream) {
-    let buf = '', fullText = '', fullReasoning = '';
+  if (!clientStream) {
+    let buf = '', fullText = '', fullReasoning = '', finishReason = 'stop';
     const toolCalls = [];
     let toolPart = null;
 
@@ -20,11 +37,12 @@ function handleUpstreamResponse(proxyRes, res, model, isStream) {
       const lines = buf.split('\n');
       buf = lines.pop();
       for (const line of lines) {
-        const t = line.trim();
-        if (!t) continue;
-        let evt;
-        try { evt = JSON.parse(t); } catch { continue; }
+        const evt = parseLine(line);
+        if (!evt) continue;
         switch (evt.type) {
+          case 'start':
+            if (evt.id) genId = evt.id;
+            break;
           case 'text-delta':
             fullText += evt.text || '';
             break;
@@ -32,11 +50,7 @@ function handleUpstreamResponse(proxyRes, res, model, isStream) {
             fullReasoning += evt.text || '';
             break;
           case 'tool-input-start':
-            toolPart = {
-              id: evt.id,
-              type: 'function',
-              function: { name: evt.toolName, arguments: '' },
-            };
+            toolPart = { id: evt.id, type: 'function', function: { name: evt.toolName, arguments: '' } };
             toolCalls.push(toolPart);
             break;
           case 'tool-input-delta':
@@ -46,17 +60,30 @@ function handleUpstreamResponse(proxyRes, res, model, isStream) {
           case 'tool-call':
             toolPart = null;
             break;
+          case 'finish-step':
+          case 'finish':
+            finishReason = evt.finishReason || finishReason;
+            {
+              const u = extractUsage(evt);
+              if (u) usage = u;
+            }
+            break;
         }
       }
     });
 
     proxyRes.on('end', () => {
       if (buf.trim()) {
-        try {
-          const evt = JSON.parse(buf.trim());
+        const evt = parseLine(buf.trim());
+        if (evt) {
           if (evt.type === 'text-delta') fullText += evt.text || '';
           else if (evt.type === 'reasoning-delta') fullReasoning += evt.text || '';
-        } catch {}
+          else if (evt.type === 'finish-step' || evt.type === 'finish') {
+            finishReason = evt.finishReason || finishReason;
+            const u = extractUsage(evt);
+            if (u) usage = u;
+          }
+        }
       }
       const text = fullText || fullReasoning;
       const msg = { role: 'assistant', content: text || null };
@@ -70,12 +97,15 @@ function handleUpstreamResponse(proxyRes, res, model, isStream) {
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model,
-        choices: [{ index: 0, message: msg, finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop' }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        choices: [{ index: 0, message: msg, finish_reason: toolCalls.length > 0 ? 'tool_calls' : finishReason }],
+        usage,
       }));
       log(`[done] text=${text.length} tools=${toolCalls.length}`);
     });
   } else {
+    let buf = '', toolCalls = [], toolIdx = 0, roleSent = false, tChars = 0, rChars = 0;
+    let finishReason = 'stop';
+
     res.writeHead(200, {
       ...CORS,
       'Content-Type': 'text/event-stream',
@@ -83,15 +113,8 @@ function handleUpstreamResponse(proxyRes, res, model, isStream) {
       Connection: 'keep-alive',
     });
 
-    let buf = '', toolCalls = [], toolIdx = 0, roleSent = false, tChars = 0, rChars = 0;
-
     const write = (chunk) => res.write(sse(chunk));
-    const base = () => ({
-      id: genId,
-      object: 'chat.completion.chunk',
-      created: Math.floor(Date.now() / 1000),
-      model,
-    });
+    const base = () => ({ id: genId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model });
     const ensureRole = () => {
       if (!roleSent) {
         roleSent = true;
@@ -104,11 +127,12 @@ function handleUpstreamResponse(proxyRes, res, model, isStream) {
       const lines = buf.split('\n');
       buf = lines.pop();
       for (const line of lines) {
-        const t = line.trim();
-        if (!t) continue;
-        let evt;
-        try { evt = JSON.parse(t); } catch { continue; }
+        const evt = parseLine(line);
+        if (!evt) continue;
         switch (evt.type) {
+          case 'start':
+            if (evt.id) genId = evt.id;
+            break;
           case 'text-start':
             toolCalls = [];
             toolIdx = 0;
@@ -125,7 +149,11 @@ function handleUpstreamResponse(proxyRes, res, model, isStream) {
             if (evt.text) {
               rChars += evt.text.length;
               ensureRole();
-              write({ ...base(), choices: [{ index: 0, delta: { content: evt.text }, finish_reason: null }] });
+              write({
+                ...base(),
+                choices: [{ index: 0, delta: { content: '' }, finish_reason: null }],
+                reasoning_content: evt.text,
+              });
             }
             break;
           case 'tool-input-start':
@@ -153,13 +181,21 @@ function handleUpstreamResponse(proxyRes, res, model, isStream) {
               });
             }
             break;
+          case 'finish-step':
+          case 'finish':
+            finishReason = evt.finishReason || finishReason;
+            {
+              const u = extractUsage(evt);
+              if (u) usage = u;
+            }
+            break;
         }
       }
     });
 
     proxyRes.on('end', () => {
-      const reason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
-      write({ ...base(), choices: [{ index: 0, delta: {}, finish_reason: reason }] });
+      const reason = toolCalls.length > 0 ? 'tool_calls' : finishReason;
+      write({ ...base(), choices: [{ index: 0, delta: {}, finish_reason: reason }], usage: { ...usage } });
       res.write('data: [DONE]\n\n');
       res.end();
       log(`[done] text=${tChars} reasoning=${rChars} tools=${toolCalls.length} reason=${reason}`);

@@ -1,7 +1,8 @@
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
-const { PORT, HOST, PATH, CORS, agent, CC_VERSION } = require('./src/config');
+const { PORT, HOST, CORS, agent, CC_VERSION } = require('./src/config');
 const { log, logErr, logFile } = require('./src/logger');
 const { transform } = require('./src/transform');
 const { handleUpstreamResponse } = require('./src/response');
@@ -63,6 +64,7 @@ function handleRequest(req, res) {
         'Content-Length': Buffer.byteLength(upstream),
         Authorization: auth,
         'x-command-code-version': CC_VERSION,
+        'x-session-id': crypto.randomUUID(),
       },
     }, proxyRes => {
       log(`[upstream] ${proxyRes.statusCode}`);

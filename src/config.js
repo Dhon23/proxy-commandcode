@@ -1,15 +1,14 @@
-const http = require('http');
 const https = require('https');
 
 const PORT = process.env.PCMC_PORT || 3456;
 const HOST = 'api.commandcode.ai';
 const PATH = '/alpha/generate';
-const CC_VERSION = process.env.PCMC_VERSION || '0.39.1';
+const CC_VERSION = process.env.PCMC_VERSION || '0.41.1';
 
 const STATIC_CONFIG = {
   workingDir: '',
   date: new Date().toISOString().slice(0, 10),
-  environment: 'windows',
+  environment: process.env.PCMC_ENV || 'production',
   structure: [],
   isGitRepo: false,
   currentBranch: '',

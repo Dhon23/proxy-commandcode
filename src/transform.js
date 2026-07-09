@@ -73,7 +73,8 @@ function transform(oaiBody) {
       messages,
       tools: tools.length > 0 ? tools : undefined,
       max_tokens: oaiBody.max_tokens || 32000,
-      stream: oaiBody.stream !== false,
+      temperature: oaiBody.temperature,
+      stream: true,
     },
   });
 }
