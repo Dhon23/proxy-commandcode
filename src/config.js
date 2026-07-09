@@ -1,0 +1,37 @@
+const http = require('http');
+const https = require('https');
+
+const PORT = process.env.PCMC_PORT || 3456;
+const HOST = 'api.commandcode.ai';
+const PATH = '/alpha/generate';
+const CC_VERSION = process.env.PCMC_VERSION || '0.39.1';
+
+const STATIC_CONFIG = {
+  workingDir: '',
+  date: new Date().toISOString().slice(0, 10),
+  environment: 'windows',
+  structure: [],
+  isGitRepo: false,
+  currentBranch: '',
+  mainBranch: 'main',
+  gitStatus: '',
+  recentCommits: [],
+};
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+const agent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 10,
+  timeout: 300000,
+});
+
+function sse(obj) {
+  return `data: ${JSON.stringify(obj)}\n\n`;
+}
+
+module.exports = { PORT, HOST, PATH, CC_VERSION, STATIC_CONFIG, CORS, agent, sse };
