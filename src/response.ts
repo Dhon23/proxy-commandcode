@@ -76,7 +76,7 @@ function logUsage(model: string, tokens: CCUsage & { cost: number | null }): voi
 }
 
 function computeUsage(model: string, inputTokens: number, fullText: string, fullUsage: CCUsage & { cost: number | null } | null): OpenAIUsage {
-  if (fullUsage) {
+  if (fullUsage && fullUsage.totalTokens > 0) {
     logUsage(model, fullUsage)
     return {
       prompt_tokens: fullUsage.inputTokens,
