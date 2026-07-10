@@ -4,8 +4,6 @@ import { logger } from './logger'
 
 logger.info('=== proxy started ===')
 
-let activeConns = 0
-
 const server = Bun.serve({
   port: config.port,
   fetch: (req) => {
