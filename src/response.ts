@@ -8,6 +8,7 @@ import type {
   OpenAIUsage,
 } from './types'
 import { logger } from './logger'
+import { encode } from 'gpt-tokenizer'
 
 const errorTypeMap: Record<string, string> = {
   UNAUTHORIZED: 'authentication_error',
@@ -74,6 +75,32 @@ function logUsage(model: string, tokens: CCUsage & { cost: number | null }): voi
   logger.info({ model, usage: tokens }, `[usage] ${model} ${parts.join(' ')}`)
 }
 
+function computeUsage(model: string, inputTokens: number, fullText: string, fullUsage: CCUsage & { cost: number | null } | null): OpenAIUsage {
+  if (fullUsage && fullUsage.totalTokens > 0) {
+    logUsage(model, fullUsage)
+    return {
+      prompt_tokens: fullUsage.inputTokens,
+      completion_tokens: fullUsage.outputTokens,
+      total_tokens: fullUsage.totalTokens,
+    }
+  }
+  const promptTokens = inputTokens
+  const completionTokens = encode(fullText).length
+  logUsage(model, {
+    inputTokens: promptTokens,
+    outputTokens: completionTokens,
+    totalTokens: promptTokens + completionTokens,
+    cachedInputTokens: 0,
+    reasoningTokens: 0,
+    cost: null,
+  })
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+  }
+}
+
 function sse(obj: Record<string, unknown>): string {
   return `data: ${JSON.stringify(obj)}\n\n`
 }
@@ -83,14 +110,15 @@ export async function handleUpstreamResponse(
   statusCode: number,
   model: string,
   clientStream: boolean,
+  inputTokens: number,
 ): Promise<Response> {
   if (statusCode >= 400) {
     return handleError(src, statusCode)
   }
   if (clientStream) {
-    return handleStream(src, model)
+    return handleStream(src, model, inputTokens)
   }
-  return handleBuffer(src, model)
+  return handleBuffer(src, model, inputTokens)
 }
 
 async function handleError(src: ReadableStream<Uint8Array>, statusCode: number): Promise<Response> {
@@ -114,7 +142,7 @@ async function handleError(src: ReadableStream<Uint8Array>, statusCode: number):
   })
 }
 
-async function handleBuffer(src: ReadableStream<Uint8Array>, model: string): Promise<Response> {
+async function handleBuffer(src: ReadableStream<Uint8Array>, model: string, inputTokens: number): Promise<Response> {
   const reader = src.getReader()
   const decoder = new TextDecoder()
   let genId = 'chatcmpl-' + Date.now()
@@ -148,7 +176,7 @@ async function handleBuffer(src: ReadableStream<Uint8Array>, model: string): Pro
             fullReasoning += evt.text || ''
             break
           case 'tool-input-start':
-            toolPart = { id: evt.id!, type: 'function', function: { name: evt.toolName!, arguments: '' } }
+            toolPart = { id: evt.id || '', type: 'function', function: { name: evt.toolName || '', arguments: '' } }
             toolCalls.push(toolPart)
             break
           case 'tool-input-delta':
@@ -179,13 +207,7 @@ async function handleBuffer(src: ReadableStream<Uint8Array>, model: string): Pro
     }
   } catch { /* stream error */ }
 
-  const usage: OpenAIUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-  if (fullUsage) {
-    usage.prompt_tokens = fullUsage.inputTokens
-    usage.completion_tokens = fullUsage.outputTokens
-    usage.total_tokens = fullUsage.totalTokens
-    logUsage(model, fullUsage)
-  }
+  const usage = computeUsage(model, inputTokens, fullText || fullReasoning, fullUsage)
 
   const text = fullText || fullReasoning
   const msg: OpenAIChatCompletion['choices'][0]['message'] = {
@@ -218,7 +240,7 @@ async function handleBuffer(src: ReadableStream<Uint8Array>, model: string): Pro
   })
 }
 
-async function handleStream(src: ReadableStream<Uint8Array>, model: string): Promise<Response> {
+async function handleStream(src: ReadableStream<Uint8Array>, model: string, inputTokens: number): Promise<Response> {
   const reader = src.getReader()
   const decoder = new TextDecoder()
   let genId = 'chatcmpl-' + Date.now()
@@ -226,6 +248,8 @@ async function handleStream(src: ReadableStream<Uint8Array>, model: string): Pro
   let roleSent = false
   let tChars = 0
   let rChars = 0
+  let fullText = ''
+  let fullReasoning = ''
   let finishReason = 'stop'
   const toolCalls: { id: string; name: string }[] = []
   let fullUsage: CCUsage & { cost: number | null } | null = null
@@ -279,6 +303,7 @@ async function handleStream(src: ReadableStream<Uint8Array>, model: string): Pro
               case 'text-delta':
                 if (evt.text) {
                   tChars += evt.text.length
+                  fullText += evt.text
                   controller.enqueue(encoder.encode(sse({
                     ...base(),
                     choices: [{ index: 0, delta: { content: evt.text }, finish_reason: null }],
@@ -288,6 +313,7 @@ async function handleStream(src: ReadableStream<Uint8Array>, model: string): Pro
               case 'reasoning-delta':
                 if (evt.text) {
                   rChars += evt.text.length
+                  fullReasoning += evt.text
                   ensureRole(controller)
                   controller.enqueue(encoder.encode(sse({
                     ...base(),
@@ -299,7 +325,7 @@ async function handleStream(src: ReadableStream<Uint8Array>, model: string): Pro
               case 'tool-input-start':
                 ensureRole(controller)
                 toolIdx = toolCalls.length
-                toolCalls.push({ id: evt.id!, name: evt.toolName! })
+                toolCalls.push({ id: evt.id || '', name: evt.toolName || '' })
                 controller.enqueue(encoder.encode(sse({
                   ...base(),
                   choices: [{
@@ -307,9 +333,9 @@ async function handleStream(src: ReadableStream<Uint8Array>, model: string): Pro
                     delta: {
                       tool_calls: [{
                         index: toolIdx,
-                        id: evt.id,
+                        id: evt.id || '',
                         type: 'function' as const,
-                        function: { name: evt.toolName!, arguments: '' },
+                        function: { name: evt.toolName || '', arguments: '' },
                       }],
                     },
                     finish_reason: null,
@@ -335,13 +361,7 @@ async function handleStream(src: ReadableStream<Uint8Array>, model: string): Pro
         }
       } catch { /* stream error */ }
 
-      const usage: OpenAIUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      if (fullUsage) {
-        usage.prompt_tokens = fullUsage.inputTokens
-        usage.completion_tokens = fullUsage.outputTokens
-        usage.total_tokens = fullUsage.totalTokens
-        logUsage(model, fullUsage)
-      }
+      const usage = computeUsage(model, inputTokens, fullText || fullReasoning, fullUsage)
 
       const reason = toolCalls.length > 0 ? 'tool_calls' : finishReason
       controller.enqueue(encoder.encode(sse({

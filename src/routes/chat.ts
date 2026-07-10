@@ -6,8 +6,34 @@ import { handleUpstreamResponse } from '../response'
 import { check } from '../ratelimit'
 import { incrementRequests } from './health'
 import type { OpenAIChatRequestType } from '../types'
+import { encode } from 'gpt-tokenizer'
 
 const chat = new Hono()
+
+function countInputTokens(messages: { role: string; name?: string; content?: string | unknown[] | null; tool_calls?: { function?: { name?: string; arguments?: string } }[] }[]): number {
+  let total = 0
+  for (const m of messages) {
+    if (m.name) {
+      total += encode(m.name).length
+    }
+    if (typeof m.content === 'string') {
+      total += encode(m.content).length
+    } else if (Array.isArray(m.content)) {
+      for (const part of m.content as { type?: string; text?: string }[]) {
+        if (part.type === 'text' && part.text) {
+          total += encode(part.text).length
+        }
+      }
+    }
+    if (m.role === 'assistant' && m.tool_calls) {
+      for (const tc of m.tool_calls) {
+        if (tc.function?.name) total += encode(tc.function.name).length
+        if (tc.function?.arguments) total += encode(tc.function.arguments).length
+      }
+    }
+  }
+  return total
+}
 
 chat.post('/v1/chat/completions', async (c) => {
   const auth = c.req.header('Authorization') || ''
@@ -36,6 +62,8 @@ chat.post('/v1/chat/completions', async (c) => {
   logger.info({ model, stream: isStream }, `[req] ${model} stream=${isStream}`)
   incrementRequests()
 
+  const inputTokens = countInputTokens(oai.messages)
+
   let upstreamBody: string
   try {
     upstreamBody = JSON.stringify(transform(oai))
@@ -61,7 +89,6 @@ chat.post('/v1/chat/completions', async (c) => {
       signal: controller.signal,
     })
   } catch (err) {
-    clearTimeout(t)
     logger.error({ err }, '[upstream] fetch error')
     return c.json({ error: (err as Error).message }, 502)
   } finally {
@@ -74,7 +101,7 @@ chat.post('/v1/chat/completions', async (c) => {
     return c.json({ error: 'Empty upstream response' }, 502)
   }
 
-  const response = await handleUpstreamResponse(proxyRes.body, proxyRes.status, model, isStream)
+  const response = await handleUpstreamResponse(proxyRes.body, proxyRes.status, model, isStream, inputTokens)
 
   // Forward CORS headers from response handler + Hono's built-in
   return response
