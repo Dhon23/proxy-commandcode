@@ -6,11 +6,67 @@ const { PORT, HOST, CORS, agent, CC_VERSION } = require('./src/config');
 const { log, logErr, logFile } = require('./src/logger');
 const { transform } = require('./src/transform');
 const { handleUpstreamResponse } = require('./src/response');
-const { check } = require('./src/ratelimit');
+const { check, getStats } = require('./src/ratelimit');
+
+const startTime = Date.now();
+let totalReqs = 0, activeReqs = 0, draining = false;
 
 log('=== proxy started ===');
 
+function normalizeModels(body) {
+  try {
+    const obj = JSON.parse(body);
+    if (Array.isArray(obj.data)) {
+      for (const m of obj.data) {
+        if (!m.permission) m.permission = [];
+        if (!m.owned_by) m.owned_by = 'command-code';
+      }
+    }
+    return JSON.stringify(obj);
+  } catch {
+    return body;
+  }
+}
+
+function pipeUpstream(method, path, auth, res, transform) {
+  const pr = https.request({
+    hostname: HOST,
+    path,
+    method,
+    agent,
+    timeout: 30000,
+    headers: { Authorization: auth, 'x-command-code-version': CC_VERSION },
+  }, proxyRes => {
+    if (transform) {
+      let buf = '';
+      proxyRes.on('data', c => { buf += c.toString(); });
+      proxyRes.on('end', () => {
+        res.writeHead(proxyRes.statusCode, { ...CORS, 'Content-Type': 'application/json' });
+        res.end(transform(buf));
+      });
+    } else {
+      res.writeHead(proxyRes.statusCode, { ...CORS, 'Content-Type': 'application/json' });
+      proxyRes.pipe(res);
+    }
+  });
+  pr.setTimeout(30000, () => {
+    pr.destroy();
+    if (!res.headersSent) { res.writeHead(504, CORS); res.end('{}'); }
+  });
+  pr.on('error', e => {
+    logErr(`[upstream] ${e.message}`);
+    if (!res.headersSent) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: e.message })); }
+  });
+  pr.end();
+}
+
 function handleRequest(req, res) {
+  if (draining) {
+    res.writeHead(503, { ...CORS, 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Server shutting down', type: 'server_error', code: 503 } }));
+    return;
+  }
+
   if (req.method === 'OPTIONS') {
     res.writeHead(204, { ...CORS, 'Access-Control-Allow-Methods': 'POST,GET,OPTIONS', 'Access-Control-Max-Age': '86400' });
     res.end();
@@ -21,22 +77,43 @@ function handleRequest(req, res) {
     res.end(JSON.stringify({ status: 'ok' }));
     return;
   }
-  if (req.method === 'GET' && req.url === '/v1/models') {
+  if (req.method === 'GET' && req.url === '/health/upstream') {
     const auth = req.headers['authorization'] || '';
     const pr = https.request({
       hostname: HOST,
-      path: '/provider/v1/models',
+      path: '/alpha/whoami',
       method: 'GET',
       agent,
-      timeout: 30000,
+      timeout: 5000,
       headers: { Authorization: auth, 'x-command-code-version': CC_VERSION },
-    }, proxyRes => {
-      res.writeHead(proxyRes.statusCode, { ...CORS, 'Content-Type': 'application/json' });
-      proxyRes.pipe(res);
+    }, upstreamRes => {
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({ status: 'ok', upstream: upstreamRes.statusCode }));
     });
-    pr.setTimeout(30000, () => { pr.destroy(); if (!res.headersSent) { res.writeHead(504, CORS); res.end('{}'); } });
-    pr.on('error', e => { logErr(`[models] ${e.message}`); if (!res.headersSent) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: e.message })); } });
+    pr.setTimeout(5000, () => { pr.destroy(); res.writeHead(504, CORS); res.end(JSON.stringify({ status: 'error', upstream: 'timeout' })); });
+    pr.on('error', () => {
+      if (!res.headersSent) {
+        res.writeHead(502, CORS);
+        res.end(JSON.stringify({ status: 'error', upstream: 'unreachable' }));
+      }
+    });
     pr.end();
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/stats') {
+    const rl = getStats();
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+      totalRequests: totalReqs,
+      activeReqs,
+      draining,
+      rateLimits: rl,
+    }));
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/models') {
+    pipeUpstream('GET', '/provider/v1/models', req.headers['authorization'] || '', res, normalizeModels);
     return;
   }
   if (req.method !== 'POST' || !req.url.startsWith('/v1/chat/completions')) {
@@ -74,9 +151,12 @@ function handleRequest(req, res) {
     }
 
     log(`[req] ${model} stream=${isStream}`);
+    totalReqs++;
+    activeReqs++;
 
     let upstream;
     try { upstream = transform(oai); } catch (e) {
+      activeReqs = Math.max(0, activeReqs - 1);
       res.writeHead(500, CORS);
       res.end(JSON.stringify({ error: 'Transform error' }));
       return;
@@ -109,6 +189,9 @@ function handleRequest(req, res) {
       logErr(`[upstream] ${e.message}`);
       if (!res.headersSent) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: e.message })); }
     });
+
+    res.once('finish', () => { activeReqs = Math.max(0, activeReqs - 1); });
+
     pr.write(upstream);
     pr.end();
   });
@@ -136,9 +219,36 @@ server.on('error', e => {
   throw e;
 });
 
+setInterval(() => {
+  const { sockets, freeSockets, requests } = agent;
+  const socketCount = Object.values(sockets).reduce((s, a) => s + a.length, 0);
+  const freeCount = Object.values(freeSockets).reduce((s, a) => s + a.length, 0);
+  const pendingCount = Object.values(requests || {}).reduce((s, a) => s + a.length, 0);
+  log(`[pool] sockets=${socketCount} free=${freeCount} pending=${pendingCount}`);
+}, 60000);
+
 function shutdown() {
-  log('=== proxy shutting down ===');
-  server.close(() => logFile.end(() => process.exit(0)));
+  draining = true;
+  log(`=== draining ${activeReqs} requests ===`);
+  server.close(() => {
+    if (activeReqs === 0) {
+      log('=== all requests drained ===');
+      logFile.end(() => process.exit(0));
+    }
+  });
+  const forceExit = setTimeout(() => {
+    log('=== force exit after drain timeout ===');
+    logFile.end(() => process.exit(0));
+  }, 30000);
+  const checkDrain = setInterval(() => {
+    if (activeReqs === 0) {
+      clearTimeout(forceExit);
+      clearInterval(checkDrain);
+      log('=== all requests drained ===');
+      logFile.end(() => process.exit(0));
+    }
+  }, 200);
 }
+
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

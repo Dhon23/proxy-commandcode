@@ -65,4 +65,17 @@ function cleanup() {
 
 setInterval(cleanup, 60000);
 
-module.exports = { check, cleanup };
+function getStats() {
+  const now = Date.now();
+  let activeKeys = 0, totalReqs = 0, totalTokens = 0;
+  for (const [key, bucket] of buckets) {
+    prune(bucket, now);
+    if (bucket.requests.length === 0) continue;
+    activeKeys++;
+    totalReqs += bucket.requests.length;
+    totalTokens += bucket.tokens.reduce((s, t) => s + t.count, 0);
+  }
+  return { activeKeys, currentRPM: totalReqs, currentTPM: totalTokens, limits: { rpm: RATE_LIMIT_RPM, tpm: RATE_LIMIT_TPM } };
+}
+
+module.exports = { check, cleanup, getStats };

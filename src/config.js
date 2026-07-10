@@ -29,8 +29,8 @@ const agent = new https.Agent({
   timeout: 300000,
 });
 
-const RATE_LIMIT_RPM = parseInt(process.env.PCMC_RATE_LIMIT_RPM || '5', 10);
-const RATE_LIMIT_TPM = parseInt(process.env.PCMC_RATE_LIMIT_TPM || '100000', 10);
+const RATE_LIMIT_RPM = parseInt(process.env.PCMC_RATE_LIMIT_RPM || '15', 10);
+const RATE_LIMIT_TPM = parseInt(process.env.PCMC_RATE_LIMIT_TPM || '600000', 10);
 
 function sse(obj) {
   return `data: ${JSON.stringify(obj)}\n\n`;

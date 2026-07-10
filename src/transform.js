@@ -53,7 +53,15 @@ function transform(oaiBody) {
       const parts = [];
       for (const p of m.content) {
         if (p.type === 'text') parts.push({ type: 'text', text: p.text });
-        else if (p.type === 'image_url') parts.push({ type: 'image', url: p.image_url?.url });
+        else if (p.type === 'image_url') {
+          const imgUrl = p.image_url?.url || '';
+          const m = imgUrl.match(/^data:(image\/\w+);base64,(.+)$/);
+          if (m) {
+            parts.push({ type: 'image', image: m[2], mediaType: m[1] });
+          } else {
+            parts.push({ type: 'image', image: imgUrl, mediaType: 'image/png' });
+          }
+        }
       }
       messages.push({ role: m.role, content: parts });
     } else {
@@ -80,6 +88,8 @@ function transform(oaiBody) {
       tools: tools.length > 0 ? tools : undefined,
       max_tokens: oaiBody.max_tokens || 32000,
       temperature: oaiBody.temperature,
+      top_p: oaiBody.top_p,
+      stop: oaiBody.stop,
       stream: true,
     },
   });
