@@ -6,6 +6,7 @@ const { PORT, HOST, CORS, agent, CC_VERSION } = require('./src/config');
 const { log, logErr, logFile } = require('./src/logger');
 const { transform } = require('./src/transform');
 const { handleUpstreamResponse } = require('./src/response');
+const { check } = require('./src/ratelimit');
 
 log('=== proxy started ===');
 
@@ -18,6 +19,24 @@ function handleRequest(req, res) {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ status: 'ok' }));
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/models') {
+    const auth = req.headers['authorization'] || '';
+    const pr = https.request({
+      hostname: HOST,
+      path: '/provider/v1/models',
+      method: 'GET',
+      agent,
+      timeout: 30000,
+      headers: { Authorization: auth, 'x-command-code-version': CC_VERSION },
+    }, proxyRes => {
+      res.writeHead(proxyRes.statusCode, { ...CORS, 'Content-Type': 'application/json' });
+      proxyRes.pipe(res);
+    });
+    pr.setTimeout(30000, () => { pr.destroy(); if (!res.headersSent) { res.writeHead(504, CORS); res.end('{}'); } });
+    pr.on('error', e => { logErr(`[models] ${e.message}`); if (!res.headersSent) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: e.message })); } });
+    pr.end();
     return;
   }
   if (req.method !== 'POST' || !req.url.startsWith('/v1/chat/completions')) {
@@ -44,6 +63,16 @@ function handleRequest(req, res) {
       return;
     }
     const model = oai.model || '-', isStream = oai.stream === true;
+
+    const key = auth.replace(/^Bearer\s+/i, '').trim() || 'anonymous';
+    const rl = check(key, oai.max_tokens || 32000);
+    if (!rl.allowed) {
+      res.writeHead(429, { ...CORS, 'Content-Type': 'application/json', 'Retry-After': '60' });
+      res.end(JSON.stringify({ error: { message: rl.reason, type: 'rate_limit_error', param: null, code: 429 } }));
+      log(`[req] ${model} stream=${isStream} RATE_LIMITED`);
+      return;
+    }
+
     log(`[req] ${model} stream=${isStream}`);
 
     let upstream;
@@ -64,6 +93,7 @@ function handleRequest(req, res) {
         'Content-Length': Buffer.byteLength(upstream),
         Authorization: auth,
         'x-command-code-version': CC_VERSION,
+        'x-cli-environment': 'production',
         'x-session-id': crypto.randomUUID(),
       },
     }, proxyRes => {
@@ -105,4 +135,10 @@ server.on('error', e => {
   }
   throw e;
 });
-process.on('SIGINT', () => server.close(() => logFile.end(() => process.exit(0))));
+
+function shutdown() {
+  log('=== proxy shutting down ===');
+  server.close(() => logFile.end(() => process.exit(0)));
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

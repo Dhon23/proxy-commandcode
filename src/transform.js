@@ -1,5 +1,11 @@
 const { STATIC_CONFIG } = require('./config');
 
+function parseJsonArg(arg) {
+  if (!arg) return {};
+  if (typeof arg === 'object') return arg;
+  try { return JSON.parse(arg); } catch { return arg; }
+}
+
 function transform(oaiBody) {
   const model = oaiBody.model || 'deepseek/deepseek-v4-pro';
   let systemText = '';
@@ -37,7 +43,7 @@ function transform(oaiBody) {
       if (m.tool_calls)
         for (const tc of m.tool_calls)
           if (tc.type === 'function' && tc.function)
-            parts.push({ type: 'tool-call', toolCallId: tc.id, toolName: tc.function.name, input: tc.function.arguments });
+            parts.push({ type: 'tool-call', toolCallId: tc.id, toolName: tc.function.name, input: parseJsonArg(tc.function.arguments) });
       messages.push({ role: 'assistant', content: parts });
       continue;
     }
