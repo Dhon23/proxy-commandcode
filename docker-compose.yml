@@ -7,4 +7,7 @@ services:
       - "${PCMC_PORT:-3456}:3456"
     environment:
       - PCMC_PORT=${PCMC_PORT:-3456}
-      - PCMC_VERSION=${PCMC_VERSION:-0.39.1}
+      - PCMC_VERSION=${PCMC_VERSION:-0.41.1}
+      - PCMC_ENV=production
+      - PCMC_RATE_LIMIT_RPM=${PCMC_RATE_LIMIT_RPM:-15}
+      - PCMC_RATE_LIMIT_TPM=${PCMC_RATE_LIMIT_TPM:-600000}
