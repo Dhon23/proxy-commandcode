@@ -1,20 +1,23 @@
-FROM oven/bun:1
+FROM oven/bun:1 AS builder
+WORKDIR /build
 
-WORKDIR /app
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production
 
-RUN groupadd -r app && useradd -r -g app app && \
-    mkdir -p /app && chown -R app:app /app
+COPY src/ ./src/
+COPY tsconfig.json ./
 
-COPY --chown=app:app package.json bun.lockb* ./
-RUN bun install --production
+RUN bun build --compile --minify --sourcemap ./src/server.ts \
+  --target=bun-linux-arm64-musl \
+  --outfile proxy
 
-COPY --chown=app:app src/ ./src/
-COPY --chown=app:app tsconfig.json .
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates libstdc++ && \
+    addgroup -S app && adduser -S app -G app
+
+COPY --from=builder --chown=app:app /build/proxy /usr/local/bin/proxy
 
 USER app
-
 EXPOSE 3456
-
 ENV NODE_ENV=production
-
-CMD ["bun", "run", "src/server.ts"]
+CMD ["proxy"]

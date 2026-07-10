@@ -4,3 +4,6 @@
 proxy.log
 README.md
 node_modules/
+proxy
+dist/
+
