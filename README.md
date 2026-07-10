@@ -4,6 +4,8 @@ A transparent reverse proxy that translates **OpenAI-compatible** requests (`/v1
 
 Use any CommandCode model (including the Go plan) with **ZCode**, **9router**, **Cursor**, **Continue**, **Aider**, and any editor that supports custom OpenAI endpoints.
 
+Built with **TypeScript** + **Hono** + **Zod**, runs on **Bun**, compiles to a single standalone binary.
+
 ## Why
 
 CommandCode has two API surfaces:
@@ -28,14 +30,29 @@ Editor → POST /v1/chat/completions (OpenAI format)
 
 ## Quick start
 
+Requires **Bun** (v1.2+).
+
 ```bash
 git clone https://github.com/nasrulhadi/proxy-commandcode.git
 cd proxy-commandcode
-node server.js
+bun install
+bun run src/server.ts
 # → listening on http://localhost:3456
 ```
 
-Zero dependencies. Node.js 18+ only.
+Or run in dev mode with auto-reload:
+
+```bash
+bun run dev
+```
+
+### Docker
+
+```bash
+docker compose up -d
+```
+
+Multi-stage build compiles the TypeScript source into a standalone binary via `bun build --compile`, then copies it into a minimal Alpine image — no runtime dependencies, no Node.js, no Bun.
 
 ### Get your token
 
@@ -45,10 +62,13 @@ Zero dependencies. Node.js 18+ only.
 
 ### Env vars
 
-| Variable | Default |
-|---|---|
-| `PCMC_PORT` | `3456` |
-| `PCMC_VERSION` | `0.39.1` |
+| Variable | Default | Description |
+|---|---|---|
+| `PCMC_PORT` | `3456` | Listening port |
+| `PCMC_VERSION` | `0.41.1` | CommandCode CLI version header |
+| `PCMC_ENV` | `production` | Environment string in upstream config |
+| `PCMC_RATE_LIMIT_RPM` | `15` | Max requests per minute per API key |
+| `PCMC_RATE_LIMIT_TPM` | `600000` | Max tokens per minute per API key |
 
 ## Integration
 
@@ -132,17 +152,13 @@ Open-weight models accessible on any plan:
 
 ## Logs
 
-All requests logged to `proxy.log`:
+Logs are JSON-structured via pino. In development, `pino-pretty` adds colorized output. In production (`PCMC_ENV=production`), plain JSON is written to stdout.
 
 ```
-[req] deepseek/deepseek-v4-pro stream=true
-[upstream] 200
-[done] text=1052 reasoning=38 tools=2 reason=tool_calls
+{"level":30,"msg":"[req] deepseek/deepseek-v4-pro stream=true"}
+{"level":30,"msg":"[upstream] 200"}
+{"level":30,"msg":"[done] text=1052 reasoning=38 tools=2 reason=tool_calls"}
 ```
-
-- `text` + `reasoning` = total characters in response
-- `tools` = number of tool calls the model made
-- `reason` = `stop` (finished) or `tool_calls` (waiting for tool results)
 
 ### Common errors
 
@@ -151,7 +167,25 @@ All requests logged to `proxy.log`:
 | `[upstream] 401` | Token invalid. Get a fresh one from billing. |
 | `[upstream] 400` | Request format mismatch. Check proxy version. |
 | `[upstream] timeout` | Upstream took >5 min. Retry. |
-| `EADDRINUSE` | Proxy auto-kills the old process on start. |
+
+## Architecture
+
+| Concern | Implementation |
+|---|---|
+| Runtime | Bun (native TypeScript) |
+| Server framework | Hono |
+| Validation | Zod schemas |
+| Logging | pino (JSON structured) |
+| Rate limiting | In-memory sliding window, per API key |
+| Deployment | Multi-stage Docker → standalone binary on Alpine |
+
+### Development
+
+```bash
+bun install          # Install deps
+bun run dev          # Start with hot-reload
+bun run typecheck    # TypeScript type check
+```
 
 ## License
 
