@@ -11,7 +11,7 @@ RUN bun build --compile --minify --sourcemap ./src/server.ts --outfile proxy
 
 FROM debian:stable-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates && \
+    ca-certificates wget && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd --system app && useradd --system --no-create-home --gid app app
 

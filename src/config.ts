@@ -8,22 +8,30 @@ const envSchema = z.object({
   PCMC_RATE_LIMIT_TPM: z.coerce.number().int().default(600000),
 })
 
-const parsed = envSchema.parse(process.env)
+const parsed = envSchema.safeParse(process.env)
+
+if (!parsed.success) {
+  const issues = parsed.error.issues.map((i) => `  - ${i.path.join('.')}: ${i.message}`).join('\n')
+  console.error(`Invalid environment variables:\n${issues}`)
+  process.exit(1)
+}
+
+const env = parsed.data
 
 export const config = {
-  port: parsed.PCMC_PORT,
+  port: env.PCMC_PORT,
   host: 'api.commandcode.ai',
   path: '/alpha/generate',
-  ccVersion: parsed.PCMC_VERSION,
-  environment: parsed.PCMC_ENV,
+  ccVersion: env.PCMC_VERSION,
+  environment: env.PCMC_ENV,
   rateLimit: {
-    rpm: parsed.PCMC_RATE_LIMIT_RPM,
-    tpm: parsed.PCMC_RATE_LIMIT_TPM,
+    rpm: env.PCMC_RATE_LIMIT_RPM,
+    tpm: env.PCMC_RATE_LIMIT_TPM,
   },
   staticConfig: {
     workingDir: '',
     date: new Date().toISOString().slice(0, 10),
-    environment: parsed.PCMC_ENV,
+    environment: env.PCMC_ENV,
     structure: [] as string[],
     isGitRepo: false,
     currentBranch: '',

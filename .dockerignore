@@ -6,4 +6,6 @@ README.md
 node_modules/
 proxy
 dist/
+.env
+.env.*
 

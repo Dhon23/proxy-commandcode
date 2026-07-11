@@ -8,6 +8,7 @@
     "dev": "bun --watch src/server.ts",
     "build": "bun build --compile --minify --sourcemap ./src/server.ts --outfile proxy",
     "typecheck": "bun run tsc --noEmit",
+    "lint": "bun run typecheck",
     "test": "bun test"
   },
   "dependencies": {

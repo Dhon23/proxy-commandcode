@@ -138,21 +138,53 @@ export async function handleUpstreamResponse(
   return handleBuffer(src, model, inputTokens)
 }
 
-async function handleError(src: ReadableStream<Uint8Array>, statusCode: number): Promise<Response> {
-  const reader = src.getReader()
-  let errorBuf = ''
+async function* readEvents(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number,
+): AsyncGenerator<CCStreamEvent> {
   const decoder = new TextDecoder()
+  let buf = ''
 
   try {
     while (true) {
-      const { done, value } = await readWithTimeout(reader, STREAM_IDLE_TIMEOUT_MS)
+      const { done, value } = await readWithTimeout(reader, timeoutMs)
+      const chunk = value ? decoder.decode(value, { stream: !done }) : ''
+      buf += chunk
+      const lines = buf.split('\n')
+      buf = lines.pop() || ''
+      for (const line of lines) {
+        const evt = parseLine(line)
+        if (evt) yield evt
+      }
       if (done) break
-      errorBuf += decoder.decode(value, { stream: true })
     }
-    errorBuf += decoder.decode()
+  } catch { /* stream error or timeout */ }
+
+  if (buf.trim()) {
+    const evt = parseLine(buf.trim())
+    if (evt) yield evt
+  }
+}
+
+async function readRawText(src: ReadableStream<Uint8Array>, timeoutMs: number): Promise<string> {
+  const reader = src.getReader()
+  const decoder = new TextDecoder()
+  let text = ''
+
+  try {
+    while (true) {
+      const { done, value } = await readWithTimeout(reader, timeoutMs)
+      if (done) break
+      text += decoder.decode(value, { stream: true })
+    }
+    text += decoder.decode()
   } catch { /* stream error */ }
 
-  const body = translateError(errorBuf)
+  return text
+}
+
+async function handleError(src: ReadableStream<Uint8Array>, statusCode: number): Promise<Response> {
+  const body = translateError(await readRawText(src, STREAM_IDLE_TIMEOUT_MS))
   return new Response(body, {
     status: statusCode,
     headers: { 'Content-Type': 'application/json' },
@@ -161,7 +193,6 @@ async function handleError(src: ReadableStream<Uint8Array>, statusCode: number):
 
 async function handleBuffer(src: ReadableStream<Uint8Array>, model: string, inputTokens: number): Promise<Response> {
   const reader = src.getReader()
-  const decoder = new TextDecoder()
   let genId = 'chatcmpl-' + Date.now()
   let fullText = ''
   let fullReasoning = ''
@@ -170,59 +201,35 @@ async function handleBuffer(src: ReadableStream<Uint8Array>, model: string, inpu
   let toolPart: OpenAIToolCall | null = null
   let fullUsage: CCUsage & { cost: number | null } | null = null
 
-  try {
-    let buf = ''
-    let done = false
-    while (!done) {
-      const result = await readWithTimeout(reader, STREAM_IDLE_TIMEOUT_MS)
-      done = result.done
-      if (result.value) buf += decoder.decode(result.value, { stream: !done })
-      const lines = buf.split('\n')
-      buf = lines.pop() || ''
-      for (const line of lines) {
-        const evt = parseLine(line)
-        if (!evt) continue
-        switch (evt.type) {
-          case 'start':
-            if (evt.id) genId = evt.id
-            break
-          case 'text-delta':
-            fullText += evt.text || ''
-            break
-          case 'reasoning-delta':
-            fullReasoning += evt.text || ''
-            break
-          case 'tool-input-start':
-            toolPart = { id: evt.id || '', type: 'function', function: { name: evt.toolName || '', arguments: '' } }
-            toolCalls.push(toolPart)
-            break
-          case 'tool-input-delta':
-            if (evt.delta && toolPart) toolPart.function.arguments += evt.delta
-            break
-          case 'tool-input-end':
-          case 'tool-call':
-            toolPart = null
-            break
-          case 'finish-step':
-          case 'finish':
-            finishReason = evt.finishReason || finishReason
-            fullUsage = extractUsage(evt)
-            break
-        }
-      }
+  for await (const evt of readEvents(reader, STREAM_IDLE_TIMEOUT_MS)) {
+    switch (evt.type) {
+      case 'start':
+        if (evt.id) genId = evt.id
+        break
+      case 'text-delta':
+        fullText += evt.text || ''
+        break
+      case 'reasoning-delta':
+        fullReasoning += evt.text || ''
+        break
+      case 'tool-input-start':
+        toolPart = { id: evt.id || '', type: 'function', function: { name: evt.toolName || '', arguments: '' } }
+        toolCalls.push(toolPart)
+        break
+      case 'tool-input-delta':
+        if (evt.delta && toolPart) toolPart.function.arguments += evt.delta
+        break
+      case 'tool-input-end':
+      case 'tool-call':
+        toolPart = null
+        break
+      case 'finish-step':
+      case 'finish':
+        finishReason = evt.finishReason || finishReason
+        fullUsage = extractUsage(evt)
+        break
     }
-    if (buf.trim()) {
-      const evt = parseLine(buf.trim())
-      if (evt) {
-        if (evt.type === 'text-delta') fullText += evt.text || ''
-        else if (evt.type === 'reasoning-delta') fullReasoning += evt.text || ''
-        else if (evt.type === 'finish-step' || evt.type === 'finish') {
-          finishReason = evt.finishReason || finishReason
-          fullUsage = extractUsage(evt)
-        }
-      }
-    }
-  } catch { /* stream error */ }
+  }
 
   const usage = computeUsage(model, inputTokens, fullText || fullReasoning, fullUsage)
 
@@ -259,7 +266,6 @@ async function handleBuffer(src: ReadableStream<Uint8Array>, model: string, inpu
 
 async function handleStream(src: ReadableStream<Uint8Array>, model: string, inputTokens: number): Promise<Response> {
   const reader = src.getReader()
-  const decoder = new TextDecoder()
   let genId = 'chatcmpl-' + Date.now()
   let toolIdx = 0
   let roleSent = false
@@ -291,92 +297,78 @@ async function handleStream(src: ReadableStream<Uint8Array>, model: string, inpu
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      let buf = ''
-      let done = false
-
-      try {
-        while (!done) {
-          const result = await readWithTimeout(reader, STREAM_IDLE_TIMEOUT_MS)
-          done = result.done
-          if (result.value) buf += decoder.decode(result.value, { stream: !done })
-          const lines = buf.split('\n')
-          buf = lines.pop() || ''
-          for (const line of lines) {
-            const evt = parseLine(line)
-            if (!evt) continue
-            switch (evt.type) {
-              case 'start':
-                if (evt.id) genId = evt.id
-                break
-              case 'text-start':
-                toolCalls.length = 0
-                toolIdx = 0
-                roleSent = true
-                controller.enqueue(encoder.encode(sse({
-                  ...base(),
-                  choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
-                })))
-                break
-              case 'text-delta':
-                if (evt.text) {
-                  tChars += evt.text.length
-                  fullText += evt.text
-                  controller.enqueue(encoder.encode(sse({
-                    ...base(),
-                    choices: [{ index: 0, delta: { content: evt.text }, finish_reason: null }],
-                  })))
-                }
-                break
-              case 'reasoning-delta':
-                if (evt.text) {
-                  rChars += evt.text.length
-                  fullReasoning += evt.text
-                  ensureRole(controller)
-                  controller.enqueue(encoder.encode(sse({
-                    ...base(),
-                    choices: [{ index: 0, delta: { content: '' }, finish_reason: null }],
-                    reasoning_content: evt.text,
-                  })))
-                }
-                break
-              case 'tool-input-start':
-                ensureRole(controller)
-                toolIdx = toolCalls.length
-                toolCalls.push({ id: evt.id || '', name: evt.toolName || '' })
-                controller.enqueue(encoder.encode(sse({
-                  ...base(),
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      tool_calls: [{
-                        index: toolIdx,
-                        id: evt.id || '',
-                        type: 'function' as const,
-                        function: { name: evt.toolName || '', arguments: '' },
-                      }],
-                    },
-                    finish_reason: null,
-                  }],
-                })))
-                break
-              case 'tool-input-delta':
-                if (evt.delta && toolCalls[toolIdx]) {
-                  const tc: OpenAIToolCallDelta = { index: toolIdx, function: { arguments: evt.delta } }
-                  controller.enqueue(encoder.encode(sse({
-                    ...base(),
-                    choices: [{ index: 0, delta: { tool_calls: [tc] }, finish_reason: null }],
-                  })))
-                }
-                break
-              case 'finish-step':
-              case 'finish':
-                finishReason = evt.finishReason || finishReason
-                fullUsage = extractUsage(evt)
-                break
+      for await (const evt of readEvents(reader, STREAM_IDLE_TIMEOUT_MS)) {
+        switch (evt.type) {
+          case 'start':
+            if (evt.id) genId = evt.id
+            break
+          case 'text-start':
+            toolCalls.length = 0
+            toolIdx = 0
+            roleSent = true
+            controller.enqueue(encoder.encode(sse({
+              ...base(),
+              choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+            })))
+            break
+          case 'text-delta':
+            if (evt.text) {
+              tChars += evt.text.length
+              fullText += evt.text
+              controller.enqueue(encoder.encode(sse({
+                ...base(),
+                choices: [{ index: 0, delta: { content: evt.text }, finish_reason: null }],
+              })))
             }
-          }
+            break
+          case 'reasoning-delta':
+            if (evt.text) {
+              rChars += evt.text.length
+              fullReasoning += evt.text
+              ensureRole(controller)
+              controller.enqueue(encoder.encode(sse({
+                ...base(),
+                choices: [{ index: 0, delta: { content: '' }, finish_reason: null }],
+                reasoning_content: evt.text,
+              })))
+            }
+            break
+          case 'tool-input-start':
+            ensureRole(controller)
+            toolIdx = toolCalls.length
+            toolCalls.push({ id: evt.id || '', name: evt.toolName || '' })
+            controller.enqueue(encoder.encode(sse({
+              ...base(),
+              choices: [{
+                index: 0,
+                delta: {
+                  tool_calls: [{
+                    index: toolIdx,
+                    id: evt.id || '',
+                    type: 'function' as const,
+                    function: { name: evt.toolName || '', arguments: '' },
+                  }],
+                },
+                finish_reason: null,
+              }],
+            })))
+            break
+          case 'tool-input-delta':
+            if (evt.delta && toolCalls[toolIdx]) {
+              const tc: OpenAIToolCallDelta = { index: toolIdx, function: { arguments: evt.delta } }
+              controller.enqueue(encoder.encode(sse({
+                ...base(),
+                choices: [{ index: 0, delta: { tool_calls: [tc] }, finish_reason: null }],
+              })))
+            }
+            break
+          case 'finish-step':
+          case 'finish':
+            finishReason = evt.finishReason || finishReason
+            fullUsage = extractUsage(evt)
+            break
         }
-      } catch { /* stream error */ }
+      }
 
       const usage = computeUsage(model, inputTokens, fullText || fullReasoning, fullUsage)
 

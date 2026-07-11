@@ -3,4 +3,7 @@ node_modules/
 proxy.log
 *.map
 dist/
+proxy
+.env
+.env.*
 
