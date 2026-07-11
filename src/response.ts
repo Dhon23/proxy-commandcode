@@ -10,6 +10,23 @@ import type {
 import { logger } from './logger'
 import { encode } from 'gpt-tokenizer'
 
+const STREAM_IDLE_TIMEOUT_MS = 120_000
+
+async function readWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number,
+) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Stream idle timeout')), timeoutMs)
+  })
+  try {
+    return await Promise.race([reader.read(), timeoutPromise])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 const errorTypeMap: Record<string, string> = {
   UNAUTHORIZED: 'authentication_error',
   PERMISSION_ERROR: 'insufficient_quota',
@@ -128,7 +145,7 @@ async function handleError(src: ReadableStream<Uint8Array>, statusCode: number):
 
   try {
     while (true) {
-      const { done, value } = await reader.read()
+      const { done, value } = await readWithTimeout(reader, STREAM_IDLE_TIMEOUT_MS)
       if (done) break
       errorBuf += decoder.decode(value, { stream: true })
     }
@@ -157,7 +174,7 @@ async function handleBuffer(src: ReadableStream<Uint8Array>, model: string, inpu
     let buf = ''
     let done = false
     while (!done) {
-      const result = await reader.read()
+      const result = await readWithTimeout(reader, STREAM_IDLE_TIMEOUT_MS)
       done = result.done
       if (result.value) buf += decoder.decode(result.value, { stream: !done })
       const lines = buf.split('\n')
@@ -279,7 +296,7 @@ async function handleStream(src: ReadableStream<Uint8Array>, model: string, inpu
 
       try {
         while (!done) {
-          const result = await reader.read()
+          const result = await readWithTimeout(reader, STREAM_IDLE_TIMEOUT_MS)
           done = result.done
           if (result.value) buf += decoder.decode(result.value, { stream: !done })
           const lines = buf.split('\n')

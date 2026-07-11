@@ -6,7 +6,9 @@
   "scripts": {
     "start": "bun run src/server.ts",
     "dev": "bun --watch src/server.ts",
-    "typecheck": "bun run tsc --noEmit"
+    "build": "bun build --compile --minify --sourcemap ./src/server.ts --outfile proxy",
+    "typecheck": "bun run tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "gpt-tokenizer": "^3.4.0",

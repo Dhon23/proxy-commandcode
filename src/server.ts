@@ -20,14 +20,14 @@ function shutdown() {
 
   const forceExit = setTimeout(() => {
     logger.info('=== force exit after drain timeout ===')
-    server.stop()
     process.exit(0)
   }, 30000)
 
-  server.stop(true)
-  clearTimeout(forceExit)
-  logger.info('=== graceful shutdown complete ===')
-  process.exit(0)
+  Promise.resolve(server.stop(true)).finally(() => {
+    clearTimeout(forceExit)
+    logger.info('=== graceful shutdown complete ===')
+    process.exit(0)
+  })
 }
 
 process.on('SIGINT', shutdown)

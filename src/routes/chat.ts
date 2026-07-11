@@ -5,6 +5,7 @@ import { transform } from '../transform'
 import { handleUpstreamResponse } from '../response'
 import { check } from '../ratelimit'
 import { incrementRequests } from './health'
+import { OpenAIChatRequest } from '../types'
 import type { OpenAIChatRequestType } from '../types'
 import { encode } from 'gpt-tokenizer'
 
@@ -40,9 +41,11 @@ chat.post('/v1/chat/completions', async (c) => {
   let oai: OpenAIChatRequestType
 
   try {
-    oai = await c.req.json() as OpenAIChatRequestType
-  } catch {
-    return c.json({ error: 'Invalid JSON' }, 400)
+    const raw = await c.req.json()
+    oai = OpenAIChatRequest.parse(raw) as OpenAIChatRequestType
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Invalid request body'
+    return c.json({ error: { message, type: 'invalid_request_error', param: null, code: 400 } }, 400)
   }
 
   const model = oai.model || '-'
