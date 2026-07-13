@@ -152,6 +152,7 @@ export interface OpenAIChatChoice {
   message: {
     role: 'assistant'
     content: string | null
+    reasoning_content?: string
     tool_calls?: OpenAIToolCall[]
   }
   finish_reason: string
@@ -164,7 +165,6 @@ export interface OpenAIChatChunk {
   model: string
   choices: OpenAIChatChunkChoice[]
   usage?: OpenAIUsage
-  reasoning_content?: string
 }
 
 export interface OpenAIChatChunkChoice {
@@ -172,6 +172,7 @@ export interface OpenAIChatChunkChoice {
   delta: {
     role?: string
     content?: string
+    reasoning_content?: string
     tool_calls?: OpenAIToolCallDelta[]
   }
   finish_reason: string | null

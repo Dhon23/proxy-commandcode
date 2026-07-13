@@ -145,6 +145,36 @@ describe('handleUpstreamResponse', () => {
       const json = await res.json()
       expect(json.choices[0].message.content).toBeNull()
     })
+
+    test('includes reasoning_content in buffer response when both reasoning and text present', async () => {
+      const lines = [
+        '{"type":"start","id":"msg_reason"}',
+        '{"type":"reasoning-delta","text":"Let me think..."}',
+        '{"type":"reasoning-delta","text":" about this."}',
+        '{"type":"text-delta","text":"The answer is 42."}',
+        '{"type":"finish","finishReason":"stop","usage":{"inputTokens":10,"outputTokens":15,"totalTokens":25,"cachedInputTokens":0,"reasoningTokens":5}}',
+      ]
+      const body = chunkedNdjsonStream(lines)
+      const res = await handleUpstreamResponse(body, 200, 'deepseek/deepseek-v4-pro', false, 0)
+
+      const json = await res.json()
+      expect(json.choices[0].message.content).toBe('The answer is 42.')
+      expect(json.choices[0].message.reasoning_content).toBe('Let me think... about this.')
+    })
+
+    test('reasoning content acts as fallback when text is empty', async () => {
+      const lines = [
+        '{"type":"start","id":"msg_fallback"}',
+        '{"type":"reasoning-delta","text":"thinking..."}',
+        '{"type":"finish","finishReason":"stop"}',
+      ]
+      const body = chunkedNdjsonStream(lines)
+      const res = await handleUpstreamResponse(body, 200, 'deepseek/deepseek-v4-pro', false, 0)
+
+      const json = await res.json()
+      expect(json.choices[0].message.content).toBe('thinking...')
+      expect(json.choices[0].message.reasoning_content).toBeUndefined()
+    })
   })
 
   describe('streaming path', () => {
@@ -224,6 +254,35 @@ describe('handleUpstreamResponse', () => {
       const finishPart = parts[parts.length - 2]?.trim()
       const finishData = finishPart?.startsWith('data: ') ? finishPart.slice(6) : finishPart
       expect(JSON.parse(finishData!).choices[0].finish_reason).toBe('stop')
+    })
+
+    test('emits reasoning_content in delta for reasoning-delta events', async () => {
+      const lines = [
+        '{"type":"start","id":"msg_reason_stream"}',
+        '{"type":"reasoning-delta","text":"Let me think..."}',
+        '{"type":"reasoning-delta","text":" about this."}',
+        '{"type":"text-start"}',
+        '{"type":"text-delta","text":"The answer."}',
+        '{"type":"finish","finishReason":"stop","usage":{"inputTokens":5,"outputTokens":10,"totalTokens":15,"cachedInputTokens":0,"reasoningTokens":5}}',
+      ]
+      const body = chunkedNdjsonStream(lines, 2)
+      const res = await handleUpstreamResponse(body, 200, 'deepseek/deepseek-v4-pro', true, 0)
+
+      const events = await sseEvents(res)
+      const reasoningEvents = events.filter((e) => {
+        const data = e.startsWith('data: ') ? e.slice(6) : e
+        const json = JSON.parse(data)
+        return json.choices?.[0]?.delta?.reasoning_content !== undefined
+      })
+
+      expect(reasoningEvents.length).toBe(2)
+
+      const first = JSON.parse(reasoningEvents[0].startsWith('data: ') ? reasoningEvents[0].slice(6) : reasoningEvents[0])
+      expect(first.choices[0].delta.reasoning_content).toBe('Let me think...')
+      expect(first.choices[0].delta.content).toBe('')
+
+      const second = JSON.parse(reasoningEvents[1].startsWith('data: ') ? reasoningEvents[1].slice(6) : reasoningEvents[1])
+      expect(second.choices[0].delta.reasoning_content).toBe(' about this.')
     })
   })
 })

@@ -237,6 +237,7 @@ async function handleBuffer(src: ReadableStream<Uint8Array>, model: string, inpu
   const msg: OpenAIChatCompletion['choices'][0]['message'] = {
     role: 'assistant' as const,
     content: text || null,
+    ...(fullReasoning && fullText ? { reasoning_content: fullReasoning } : {}),
   }
   if (toolCalls.length > 0) {
     msg.tool_calls = toolCalls
@@ -256,7 +257,7 @@ async function handleBuffer(src: ReadableStream<Uint8Array>, model: string, inpu
     usage,
   }
 
-  logger.info({ model, textLen: text.length, toolCalls: toolCalls.length }, `[done] text=${text.length} tools=${toolCalls.length}`)
+  logger.info({ model, textLen: text.length, reasoningLen: fullReasoning.length, toolCalls: toolCalls.length }, `[done] text=${text.length} reasoning=${fullReasoning.length} tools=${toolCalls.length}`)
 
   return new Response(JSON.stringify(completion), {
     status: 200,
@@ -328,8 +329,7 @@ async function handleStream(src: ReadableStream<Uint8Array>, model: string, inpu
               ensureRole(controller)
               controller.enqueue(encoder.encode(sse({
                 ...base(),
-                choices: [{ index: 0, delta: { content: '' }, finish_reason: null }],
-                reasoning_content: evt.text,
+                choices: [{ index: 0, delta: { content: '', reasoning_content: evt.text }, finish_reason: null }],
               })))
             }
             break
