@@ -118,6 +118,7 @@ export function transform(oai: OpenAIChatRequestType): CCRequest {
       top_p: oai.top_p,
       stop: oai.stop,
       stream: true,
+      ...(oai.reasoning_effort ? { reasoning_effort: oai.reasoning_effort } : {}),
     },
   }
 }

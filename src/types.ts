@@ -61,6 +61,7 @@ export const OpenAIChatRequest = z.object({
   temperature: z.number().optional(),
   top_p: z.number().optional(),
   stop: z.union([z.string(), z.array(z.string())]).optional(),
+  reasoning_effort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
 })
 
 export type OpenAIChatRequestType = z.infer<typeof OpenAIChatRequest>
@@ -97,6 +98,7 @@ export interface CCParams {
   temperature?: number
   top_p?: number
   stop?: string | string[]
+  reasoning_effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   stream: true
 }
 
